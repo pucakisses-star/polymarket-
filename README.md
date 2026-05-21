@@ -42,8 +42,20 @@ Use the YES (or NO) token ID, not the condition ID.
 python bot.py
 ```
 
-Stops cleanly on Ctrl+C. With `DRY_RUN=true` it prints intended orders without
-sending them.
+Stops cleanly on Ctrl+C.
+
+### Three modes
+
+| Mode  | How to enable                          | Needs key? | Needs USDC? | Fills? |
+| ----- | -------------------------------------- | ---------- | ----------- | ------ |
+| Paper | `PAPER_TRADING=true`                   | no         | no          | simulated against live book |
+| Dry   | `DRY_RUN=true` (default)               | yes        | no          | none; logs only |
+| Live  | `DRY_RUN=false` and `PAPER_TRADING=false` | yes      | yes         | real on-chain orders |
+
+**Paper trading** is the easiest way to try the bot. It fetches the real
+Polymarket orderbook over the public REST endpoint, simulates fills when your
+limit price crosses the live book, and tracks cash / positions / P&L in
+`paper_state.json` (persists across restarts). Delete that file to reset.
 
 ## Strategies
 

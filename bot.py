@@ -3,11 +3,8 @@ import signal
 import sys
 import time
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
-
 from config import Config
+from paper import PaperBroker
 from strategy import Signal, market_make, mean_reversion
 
 log = logging.getLogger("polybot")
@@ -16,10 +13,18 @@ log = logging.getLogger("polybot")
 class Bot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.client = self._build_client()
         self._stopping = False
+        self.paper: PaperBroker | None = None
+        self.client = None
+        if cfg.paper_trading:
+            self.paper = PaperBroker(cfg.clob_host, cfg.paper_starting_cash, cfg.paper_state_file)
+        else:
+            self.client = self._build_live_client()
 
-    def _build_client(self) -> ClobClient:
+    def _build_live_client(self):
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+
         kwargs = dict(
             host=self.cfg.clob_host,
             key=self.cfg.private_key,
@@ -33,7 +38,9 @@ class Bot:
         client.set_api_creds(creds)
         return client
 
-    def _mid_and_book(self, token_id: str) -> tuple[float, float, float] | None:
+    def _book(self, token_id: str) -> tuple[float, float] | None:
+        if self.paper:
+            return self.paper.get_book(token_id)
         try:
             book = self.client.get_order_book(token_id)
         except Exception as e:
@@ -41,11 +48,11 @@ class Bot:
             return None
         if not book.bids or not book.asks:
             return None
-        best_bid = float(book.bids[-1].price)
-        best_ask = float(book.asks[-1].price)
-        return best_bid, best_ask, (best_bid + best_ask) / 2
+        return float(book.bids[-1].price), float(book.asks[-1].price)
 
     def _open_exposure_usdc(self) -> float:
+        if self.paper:
+            return self.paper.open_exposure_usdc()
         try:
             orders = self.client.get_orders()
         except Exception as e:
@@ -62,11 +69,8 @@ class Bot:
                 continue
         return total
 
-    def _signals_for(self, token_id: str) -> list[Signal]:
-        snap = self._mid_and_book(token_id)
-        if snap is None:
-            return []
-        best_bid, best_ask, mid = snap
+    def _signals_for(self, token_id: str, best_bid: float, best_ask: float) -> list[Signal]:
+        mid = (best_bid + best_ask) / 2
         if self.cfg.strategy == "mean_reversion":
             sig = mean_reversion(
                 token_id, mid, self.cfg.mr_lower, self.cfg.mr_upper,
@@ -83,13 +87,18 @@ class Bot:
             log.info("skip %s: notional %.2f > MAX_ORDER_USDC %.2f", sig.token_id, notional, self.cfg.max_order_usdc)
             return
 
-        side = BUY if sig.side == "BUY" else SELL
-        args = OrderArgs(price=sig.price, size=sig.size, side=side, token_id=sig.token_id)
+        if self.paper:
+            self.paper.place(sig.token_id, sig.side, sig.price, sig.size)
+            return
 
         if self.cfg.dry_run:
             log.info("[DRY] %s %s sz=%.2f px=%.3f (%s)", sig.side, sig.token_id[:10], sig.size, sig.price, sig.reason)
             return
 
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
+        side = BUY if sig.side == "BUY" else SELL
+        args = OrderArgs(price=sig.price, size=sig.size, side=side, token_id=sig.token_id)
         try:
             signed = self.client.create_order(args)
             resp = self.client.post_order(signed, OrderType.GTC)
@@ -102,15 +111,23 @@ class Bot:
         if exposure >= self.cfg.max_total_usdc:
             log.info("exposure %.2f >= MAX_TOTAL_USDC %.2f, holding", exposure, self.cfg.max_total_usdc)
             return
+        marks: dict[str, float] = {}
         for token_id in self.cfg.markets:
-            for sig in self._signals_for(token_id):
+            snap = self._book(token_id)
+            if snap is None:
+                continue
+            best_bid, best_ask = snap
+            marks[token_id] = (best_bid + best_ask) / 2
+            if self.paper:
+                self.paper.settle(token_id, best_bid, best_ask)
+            for sig in self._signals_for(token_id, best_bid, best_ask):
                 self._place(sig)
+        if self.paper and marks:
+            log.info("paper %s", self.paper.summary(marks))
 
     def run(self) -> None:
-        log.info(
-            "starting strategy=%s markets=%d dry_run=%s",
-            self.cfg.strategy, len(self.cfg.markets), self.cfg.dry_run,
-        )
+        mode = "PAPER" if self.paper else ("DRY" if self.cfg.dry_run else "LIVE")
+        log.info("starting mode=%s strategy=%s markets=%d", mode, self.cfg.strategy, len(self.cfg.markets))
         while not self._stopping:
             try:
                 self.step()

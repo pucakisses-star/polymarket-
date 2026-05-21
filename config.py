@@ -49,9 +49,13 @@ class Config:
     mm_spread: float = field(default_factory=lambda: _float("MM_SPREAD", 0.02))
     mm_size: float = field(default_factory=lambda: _float("MM_SIZE", 5.0))
 
+    paper_trading: bool = field(default_factory=lambda: _bool("PAPER_TRADING", False))
+    paper_starting_cash: float = field(default_factory=lambda: _float("PAPER_STARTING_CASH", 1000.0))
+    paper_state_file: str = field(default_factory=lambda: os.getenv("PAPER_STATE_FILE", "paper_state.json"))
+
     def validate(self) -> None:
-        if not self.private_key:
-            raise RuntimeError("PRIVATE_KEY is required (set it in .env)")
+        if not self.paper_trading and not self.private_key:
+            raise RuntimeError("PRIVATE_KEY is required for live trading (or set PAPER_TRADING=true)")
         if not self.markets:
             raise RuntimeError("MARKETS is required (comma-separated token_ids)")
         if self.strategy not in ("mean_reversion", "market_make", "manual"):

@@ -1,4 +1,6 @@
 .env
+paper_state.json
+paper_state.tmp
 .venv/
 venv/
 __pycache__/
